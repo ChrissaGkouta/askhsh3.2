@@ -6,8 +6,6 @@
 
 #define EPSILON 1e-6
 
-// --- Βοηθητικές Συναρτήσεις ---
-
 // Μετατροπή πυκνού σε CSR
 void convert_to_csr(int *dense, int n, int nnz, int **values, int **col_inds, int **row_ptr) {
     *values = (int *)malloc(nnz * sizeof(int));
@@ -34,7 +32,6 @@ void convert_to_csr(int *dense, int n, int nnz, int **values, int **col_inds, in
     }
 }
 
-// Υπολογισμός SpMV: y = A * x (Local part)
 void spmv_csr_kernel(int rows, int *val, int *col, int *rpt, double *x, double *y) {
     for (int i = 0; i < rows; i++) {
         double sum = 0.0;
@@ -48,7 +45,6 @@ void spmv_csr_kernel(int rows, int *val, int *col, int *rpt, double *x, double *
     }
 }
 
-// Υπολογισμός Dense MV: y = A * x (Local part)
 void dense_mv_kernel(int rows, int n, int *matrix, double *x, double *y) {
     for (int i = 0; i < rows; i++) {
         double sum = 0.0;
@@ -89,26 +85,26 @@ int main(int argc, char *argv[]) {
     double *vector_x = (double *)malloc(n * sizeof(double)); 
     double *vector_y_local = NULL; 
     
-    // Αποτελέσματα για επαλήθευση (μόνο στο rank 0)
+    // Αποτελέσματα για επαλήθευση
     double *final_result_csr = NULL;
     double *final_result_dense = NULL;
 
-    // CSR structures (Global - only at root)
+    // CSR structures Global 
     int *csr_val = NULL, *csr_col = NULL, *csr_row_ptr = NULL;
     int nnz_total = 0;
 
-    // CSR structures (Local)
+    // CSR structures Local
     int *loc_val = NULL, *loc_col = NULL, *loc_row_ptr = NULL;
 
-    // --- Setup & Initialization (Rank 0) ---
+    // Setup & Initialization 
     int remainder = n % size;
     int local_rows = n / size + (rank < remainder ? 1 : 0);
     
-    // Arrays για Scatterv/Gatherv (Χρήσιμα σε όλους για το Allgatherv)
+    // Arrays για Scatterv/Gatherv 
     int *scounts_rows = malloc(size * sizeof(int));
     int *displs_rows = malloc(size * sizeof(int));
     
-    // Arrays μόνο για το rank 0 (αρχική διανομή)
+    // Arrays μόνο για το rank 0
     int *scounts_nnz = NULL;
     int *displs_nnz = NULL;
 
@@ -119,7 +115,6 @@ int main(int argc, char *argv[]) {
         srand(time(NULL));
         dense_matrix = (int *)malloc(n * n * sizeof(int));
         
-        // Setup scatter counts for rows
         int r_sum = 0;
         for(int i=0; i<size; i++) {
             scounts_rows[i] = n / size + (i < remainder ? 1 : 0);
@@ -131,7 +126,6 @@ int main(int argc, char *argv[]) {
         for (int i = 0; i < n; i++) vector_x[i] = 1.0;
         
         for (int i = 0; i < n * n; i++) {
-            // Αν sparsity = 0.8, θέλουμε 80% μηδενικά. Άρα γεμίζουμε αν rand > 0.8
             if ((float)rand() / RAND_MAX > sparsity) {
                 dense_matrix[i] = (rand() % 10) + 1;
                 nnz_total++;
@@ -143,7 +137,6 @@ int main(int argc, char *argv[]) {
         final_result_csr = (double *)malloc(n * sizeof(double));
         final_result_dense = (double *)malloc(n * sizeof(double));
     } else {
-         // Οι άλλοι processes πρέπει να ξέρουν τα scounts_rows/displs_rows για το Allgatherv
         int r_sum = 0;
         for(int i=0; i<size; i++) {
             scounts_rows[i] = n / size + (i < remainder ? 1 : 0);
@@ -154,14 +147,9 @@ int main(int argc, char *argv[]) {
 
     vector_y_local = (double *)malloc(local_rows * sizeof(double));
 
-    // ==========================================================
-    // ΜΕΡΟΣ 1: CSR ΥΛΟΠΟΙΗΣΗ
-    // ==========================================================
-    
     MPI_Barrier(MPI_COMM_WORLD);
     if (rank == 0) t_total_csr_start = MPI_Wtime();
 
-    // 1. (i) CSR Construction Time
     if (rank == 0) {
         double t1 = MPI_Wtime();
         convert_to_csr(dense_matrix, n, nnz_total, &csr_val, &csr_col, &csr_row_ptr);
@@ -182,7 +170,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // 2. (ii) Data Distribution Time
+    // Data Distribution Time
     MPI_Barrier(MPI_COMM_WORLD);
     if (rank == 0) t_comm_start = MPI_Wtime();
 
@@ -200,13 +188,11 @@ int main(int argc, char *argv[]) {
     MPI_Scatterv(csr_val, scounts_nnz, displs_nnz, MPI_INT, loc_val, my_nnz, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Scatterv(csr_col, scounts_nnz, displs_nnz, MPI_INT, loc_col, my_nnz, MPI_INT, 0, MPI_COMM_WORLD);
 
-    // Διανομή Row Pointers
+
     if(rank == 0) {
         int current_r = 0;
-        // Copy for rank 0
         for(int i=0; i<=local_rows; i++) loc_row_ptr[i] = csr_row_ptr[i];
         
-        // Send to others
         for(int p=1; p<size; p++) {
             int r_count = scounts_rows[p];
             current_r += scounts_rows[p-1];
@@ -214,8 +200,6 @@ int main(int argc, char *argv[]) {
         }
     } else {
         MPI_Recv(loc_row_ptr, local_rows + 1, MPI_INT, 0, 99, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        
-        // Normalize row_ptr
         int start_offset = loc_row_ptr[0];
         for(int i=0; i<=local_rows; i++) loc_row_ptr[i] -= start_offset;
     }
@@ -223,7 +207,7 @@ int main(int argc, char *argv[]) {
     MPI_Barrier(MPI_COMM_WORLD);
     if (rank == 0) t_comm_end = MPI_Wtime();
 
-    // 3. (iii) CSR Calculation Time
+    // CSR Calculation Time
     MPI_Barrier(MPI_COMM_WORLD);
     if (rank == 0) t_calc_csr_start = MPI_Wtime();
 
@@ -242,11 +226,6 @@ int main(int argc, char *argv[]) {
         for(int i=0; i<n; i++) final_result_csr[i] = vector_x[i];
     }
 
-    // ==========================================================
-    // ΜΕΡΟΣ 2: DENSE ΥΛΟΠΟΙΗΣΗ (ΓΙΑ ΣΥΓΚΡΙΣΗ)
-    // ==========================================================
-    
-    // Reset vector_x
     for(int i=0; i<n; i++) vector_x[i] = 1.0;
     
     int *loc_dense = (int *)malloc(local_rows * n * sizeof(int));
@@ -281,12 +260,7 @@ int main(int argc, char *argv[]) {
         // Αποθήκευση αποτελέσματος Dense για έλεγχο
         for(int i=0; i<n; i++) final_result_dense[i] = vector_x[i];
     }
-
-    // ==========================================================
-    // ΕΚΤΥΠΩΣΕΙΣ & ΕΛΕΓΧΟΣ
-    // ==========================================================
     if (rank == 0) {
-        // Έλεγχος ορθότητας
         int errors = 0;
         for(int i=0; i<n; i++){
             if(fabs(final_result_csr[i] - final_result_dense[i]) > EPSILON){
@@ -309,7 +283,6 @@ int main(int argc, char *argv[]) {
         free(final_result_csr); free(final_result_dense);
     }
 
-    // Καθαρισμός Local
     free(vector_x); free(vector_y_local);
     if(loc_val) free(loc_val); 
     if(loc_col) free(loc_col); 
