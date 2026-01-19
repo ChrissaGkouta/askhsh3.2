@@ -63,7 +63,7 @@ def run_all():
                 
                 # Τρέξιμο REPEATS φορές
                 for r in range(REPEATS):
-                    cmd = ["mpirun", "-np", str(p), "./mpi_spmv", str(n), str(sp), str(ITERATIONS)]
+                    cmd = ["mpirun", "--oversubscribe", "-np", str(p), "./mpi_spmv", str(n), str(sp), str(ITERATIONS)]
                     try:
                         res = subprocess.run(cmd, capture_output=True, text=True, check=True)
                         data = parse_output(res.stdout)
