@@ -1,37 +1,27 @@
 import subprocess
-import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn as sns
 import re
 import sys
+from collections import defaultdict
 
-# --- ΡΥΘΜΙΣΕΙΣ ΠΕΙΡΑΜΑΤΩΝ ---
-# Μείωσα λίγο τα runs για να τελειώνει πιο γρήγορα το demo
+# --- ΡΥΘΜΙΣΕΙΣ ---
 SIZES = [1024, 2048, 4096]
-SPARSITIES = [0.50, 0.95, 0.99] 
+SPARSITIES = [0.50, 0.95, 0.99]
 ITERATIONS = 10
 PROCS = [1, 2, 4, 8]
-REPEATS = 3
-
-# Ρυθμίσεις εμφάνισης γραφημάτων
-sns.set_theme(style="whitegrid")
-# Χρησιμοποιούμε 'Qt5Agg' ή 'TkAgg' για interactive backend αν χρειαστεί, 
-# συνήθως το matplotlib το βρίσκει αυτόματα.
+REPEATS = 3  # Πόσες φορές τρέχει για μέσο όρο
 
 def compile_code():
-    """Κάνει compile τον C κώδικα χρησιμοποιώντας το make."""
     print("Compiling C code...")
     try:
-        # Καθαρισμός παλιών binaries και compile
         subprocess.run(["make", "clean"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(["make"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         print("Compilation successful.\n")
     except subprocess.CalledProcessError:
-        print("Error: Compilation failed. Check your Makefile and C code.")
+        print("Error: Compilation failed.")
         sys.exit(1)
 
 def parse_output(output_str):
-    """Regex parsing της εξόδου του C προγράμματος."""
     data = {}
     patterns = {
         'Time_CSR_Build': r"Time_CSR_Build:\s+([0-9\.]+)",
@@ -45,16 +35,16 @@ def parse_output(output_str):
         if match:
             data[key] = float(match.group(1))
         else:
-            data[key] = None
+            return None # Αν λείπει κάτι, ακύρωση
     return data
 
 def run_experiments():
-    """Τρέχει τα πειράματα και επιστρέφει DataFrame."""
-    results_list = []
-    total_experiments = len(SIZES) * len(SPARSITIES) * len(PROCS) * REPEATS
-    counter = 0
-
-    print(f"Starting experiments (Total runs: {total_experiments})...")
+    # Λεξικό για να μαζέψουμε τα δεδομένα: Key -> List of results
+    raw_data = defaultdict(list)
+    
+    total = len(SIZES) * len(SPARSITIES) * len(PROCS) * REPEATS
+    count = 0
+    print(f"Starting {total} runs...")
 
     for n in SIZES:
         for sp in SPARSITIES:
@@ -62,95 +52,140 @@ def run_experiments():
                 for r in range(REPEATS):
                     cmd = ["mpirun", "-np", str(p), "./mpi_spmv", str(n), str(sp), str(ITERATIONS)]
                     try:
-                        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-                        times = parse_output(result.stdout)
-                        if None in times.values():
-                            continue
-                        entry = {'N': n, 'Sparsity': sp, 'Iterations': ITERATIONS, 'Procs': p, 'Run': r + 1, **times}
-                        results_list.append(entry)
-                    except subprocess.CalledProcessError as e:
-                        print(f"Error running MPI: {e}")
+                        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                        parsed = parse_output(res.stdout)
+                        if parsed:
+                            # Αποθηκεύουμε τα αποτελέσματα με κλειδί τις παραμέτρους
+                            key = (n, sp, p)
+                            raw_data[key].append(parsed)
+                    except subprocess.CalledProcessError:
+                        print(f"\nError running N={n} P={p}")
                     
-                    counter += 1
-                    print(f"\rProgress: {counter}/{total_experiments}", end="")
-    print("\nDone collecting data.")
+                    count += 1
+                    print(f"\rProgress: {count}/{total}", end="")
+    print("\nProcessing data...")
     
-    df = pd.DataFrame(results_list)
-    if df.empty: return df
-    # Μέσος όρος των repeats
-    df_avg = df.groupby(['N', 'Sparsity', 'Iterations', 'Procs']).mean().reset_index()
-    return df_avg
+    # Υπολογισμός Μέσων Όρων
+    averaged_data = []
+    for key, runs in raw_data.items():
+        n, sp, p = key
+        avg_entry = {'N': n, 'Sparsity': sp, 'Procs': p}
+        
+        # Μέσος όρος για κάθε μετρική
+        for metric in ['Time_CSR_Build', 'Time_CSR_Comm', 'Time_CSR_Calc', 'Time_Total_CSR', 'Time_Total_Dense']:
+            values = [r[metric] for r in runs]
+            avg_entry[metric] = sum(values) / len(values)
+        
+        averaged_data.append(avg_entry)
+        
+    return averaged_data
 
-# --- ΣΥΝΑΡΤΗΣΕΙΣ ΓΡΑΦΗΜΑΤΩΝ (ΜΕ plt.show() ΑΝΤΙ ΓΙΑ savefig) ---
+# --- PLOTTING (Pure Matplotlib) ---
 
-def plot_scalability(df):
+def plot_scalability(data):
+    # Φιλτράρισμα για Sparsity = 0.95
+    target_sp = 0.95
+    subset = [d for d in data if d['Sparsity'] == target_sp]
+    
+    if not subset: return
+
     plt.figure(figsize=(10, 6))
-    target_sparsity = 0.95
-    subset = df[df['Sparsity'] == target_sparsity].copy()
-    if subset.empty: return
-
-    baseline = subset[subset['Procs'] == 1][['N', 'Time_CSR_Calc']].rename(columns={'Time_CSR_Calc': 'Base_Time'})
-    subset = pd.merge(subset, baseline, on='N')
-    subset['Speedup'] = subset['Base_Time'] / subset['Time_CSR_Calc']
-
-    sns.lineplot(data=subset, x='Procs', y='Speedup', hue='N', style='N', markers=True, dashes=False, palette="viridis")
-    plt.plot([1, subset['Procs'].max()], [1, subset['Procs'].max()], '--', color='gray', label='Ideal')
     
-    plt.title(f'CSR Scalability (Sparsity {target_sparsity})')
+    # Βρες τα μοναδικά N
+    unique_ns = sorted(list(set(d['N'] for d in subset)))
+    
+    for n in unique_ns:
+        # Πάρε τα δεδομένα για αυτό το N, ταξινομημένα κατά Procs
+        points = sorted([d for d in subset if d['N'] == n], key=lambda x: x['Procs'])
+        
+        procs = [p['Procs'] for p in points]
+        times = [p['Time_CSR_Calc'] for p in points]
+        
+        # Speedup = T(1) / T(P)
+        base_time = times[0] # Ο χρόνος με 1 proc (είναι sorted)
+        speedup = [base_time / t for t in times]
+        
+        plt.plot(procs, speedup, marker='o', label=f'N={n}')
+
+    # Ιδανική γραμμή
+    max_p = max(d['Procs'] for d in subset)
+    plt.plot([1, max_p], [1, max_p], '--', color='gray', label='Ideal')
+    
+    plt.title(f'Scalability (Sparsity {target_sp})')
+    plt.xlabel('Processes')
     plt.ylabel('Speedup')
-    plt.tight_layout()
-    print("Displaying Scalability plot... (Close window to continue)")
-    plt.show() # <--- Εμφάνιση στην οθόνη
+    plt.legend()
+    plt.grid(True)
+    print("Showing Scalability Plot (Close window to continue)...")
+    plt.show()
 
-def plot_csr_vs_dense(df):
-    plt.figure(figsize=(10, 6))
-    max_n = df['N'].max()
-    max_procs = df['Procs'].max()
-    subset = df[(df['N'] == max_n) & (df['Procs'] == max_procs)].copy()
-    if subset.empty: return
+def plot_csr_vs_dense(data):
+    # Φιλτράρισμα για Max N και Max Procs
+    max_n = max(d['N'] for d in data)
+    max_p = max(d['Procs'] for d in data)
     
-    melted = subset.melt(id_vars=['Sparsity'], value_vars=['Time_CSR_Calc', 'Time_Total_Dense'], var_name='Method', value_name='Time')
-    melted['Method'] = melted['Method'].replace({'Time_CSR_Calc': 'CSR', 'Time_Total_Dense': 'Dense'})
+    subset = sorted([d for d in data if d['N'] == max_n and d['Procs'] == max_p], key=lambda x: x['Sparsity'])
+    
+    if not subset: return
 
-    sns.barplot(data=melted, x='Sparsity', y='Time', hue='Method', palette="muted")
-    plt.title(f'CSR vs Dense Performance (N={max_n}, Procs={max_procs})')
+    sparsities = [d['Sparsity'] for d in subset]
+    t_csr = [d['Time_CSR_Calc'] for d in subset]
+    t_dense = [d['Time_Total_Dense'] for d in subset]
+    
+    x = range(len(sparsities))
+    width = 0.35
+    
+    plt.figure(figsize=(10, 6))
+    plt.bar([i - width/2 for i in x], t_csr, width, label='CSR')
+    plt.bar([i + width/2 for i in x], t_dense, width, label='Dense')
+    
+    plt.xticks(x, sparsities)
+    plt.title(f'CSR vs Dense (N={max_n}, Procs={max_p})')
+    plt.xlabel('Sparsity')
+    plt.ylabel('Time (s) - Log Scale')
     plt.yscale('log')
-    plt.ylabel('Time (log scale)')
-    plt.tight_layout()
-    print("Displaying CSR vs Dense plot... (Close window to continue)")
-    plt.show() # <--- Εμφάνιση στην οθόνη
+    plt.legend()
+    plt.grid(True, axis='y')
+    print("Showing CSR vs Dense Plot (Close window to continue)...")
+    plt.show()
 
-def plot_time_breakdown(df):
+def plot_breakdown(data):
+    # Φιλτράρισμα για Max N και Sparsity 0.95
+    max_n = max(d['N'] for d in data)
+    target_sp = 0.95
+    
+    subset = sorted([d for d in data if d['N'] == max_n and d['Sparsity'] == target_sp], key=lambda x: x['Procs'])
+    
+    if not subset: return
+    
+    procs = [str(d['Procs']) for d in subset] # String για να είναι κατηγορικός άξονας
+    t_build = [d['Time_CSR_Build'] for d in subset]
+    t_comm = [d['Time_CSR_Comm'] for d in subset]
+    t_calc = [d['Time_CSR_Calc'] for d in subset]
+    
     plt.figure(figsize=(10, 6))
-    target_n = df['N'].max()
-    subset = df[(df['N'] == target_n) & (df['Sparsity'] == 0.95)].copy()
-    if subset.empty: return
     
-    plt.bar(subset['Procs'], subset['Time_CSR_Build'], label='Build (Serial)', color='#e74c3c')
-    plt.bar(subset['Procs'], subset['Time_CSR_Comm'], bottom=subset['Time_CSR_Build'], label='Communication', color='#3498db')
-    plt.bar(subset['Procs'], subset['Time_CSR_Calc'], bottom=subset['Time_CSR_Build']+subset['Time_CSR_Comm'], label='Calculation', color='#2ecc71')
+    # Stacked Bars
+    p1 = plt.bar(procs, t_build, label='Build')
+    p2 = plt.bar(procs, t_comm, bottom=t_build, label='Comm')
+    # Το bottom του 3ου είναι το άθροισμα των 2 πρώτων
+    bottom_3 = [t_build[i] + t_comm[i] for i in range(len(t_build))]
+    p3 = plt.bar(procs, t_calc, bottom=bottom_3, label='Calc')
     
-    plt.title(f'CSR Time Breakdown (N={target_n}, Sp=0.95)')
+    plt.title(f'Time Breakdown (N={max_n}, Sp={target_sp})')
     plt.xlabel('Processes')
     plt.ylabel('Time (s)')
     plt.legend()
-    plt.tight_layout()
-    print("Displaying Time Breakdown plot... (Close window to finish)")
-    plt.show() # <--- Εμφάνιση στην οθόνη
-
-# --- MAIN ---
+    print("Showing Breakdown Plot...")
+    plt.show()
 
 if __name__ == "__main__":
     compile_code()
+    results = run_experiments()
     
-    df_results = run_experiments()
-    
-    if not df_results.empty:
-        print("\nExperiments finished. Preparing plots...")
-        # Το script θα σταματάει σε κάθε plot μέχρι να κλείσεις το παράθυρο
-        plot_scalability(df_results)
-        plot_csr_vs_dense(df_results)
-        plot_time_breakdown(df_results)
-        print("\nAll plots displayed.")
+    if results:
+        plot_scalability(results)
+        plot_csr_vs_dense(results)
+        plot_breakdown(results)
     else:
-        print("No results collected. Check compilation or MPI execution.")
+        print("No results found.")
