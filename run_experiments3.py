@@ -1,5 +1,5 @@
 import subprocess
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
 import re
 import sys
 from collections import defaultdict
